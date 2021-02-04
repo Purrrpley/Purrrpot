@@ -8,7 +8,7 @@ import discord.abc
 def command(
 	client: discord.Client,
 	message: discord.Message,
-	namespace: argparse.Namespace
+	namespace: argparse.Namespace,
 ):
 	users = namespace.users
 	users_amount = len(users)
@@ -33,7 +33,7 @@ def command(
 	run_coro_safe(message.channel.send(f'Hello{users_str}!'), client.loop)
 
 
-def arg_parser():
+def make_parser():
 	parser = argparse.ArgumentParser()
 	
 	parser.add_argument('users', type=str, nargs='*')

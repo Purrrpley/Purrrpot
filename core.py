@@ -1,58 +1,106 @@
 import argparse
 import asyncio
 import importlib
-import time
+import json
+import os
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
 
 import discord
 
 
-def quantum_vortex(client, message):
-	send_message(
-		client,
-		message.channel,
-		f'Assembling quantum vortex #{message.content}...'
-	)
-	time.sleep(1)
-	send_message(
-		client,
-		message.channel,
-		f'Quantum vortex #{message.content} assembled!'
-	)
-
-
-# Wrapper for `messageable.send()`, allowing it to easily be called from 
-# synchronous functions. Reading for why it's done this way:
-# https://docs.python.org/3/library/asyncio-dev.html#asyncio-multithreading
-# ---
-# Probably should be changed to be a Client method
-def send_message(
-		client: discord.Client,
-		messageable: discord.abc.Messageable,
-		*args,
-		**kwargs,
-	):
-	asyncio.run_coroutine_threadsafe(
-		messageable.send(*args, **kwargs),
-		client.loop,
-	)
-
-
 class Client(discord.Client):
-	# Add the command executor argument without overriding discord.Client's 
-	# __init__ method
+	# Store commands as named tuple (so that the make_parser() function only 
+	# has to be called once)
+	Command = namedtuple('Command', ['command', 'parser'])
+	
+	# Custom errors
+	class InvalidCommandError(Exception): pass
+	class UnknownCommandError(Exception): pass
+	
+	@staticmethod
+	def mention_to_text(mention: str):
+		# Mentions in messages have a `!` in them, but `self.user.mention` and 
+		# likely some other placed doesn't, so this function add it.
+		return f'{mention[:2]}!{mention[2:]}'
+	
 	def __init__(self, executor: ThreadPoolExecutor, *args, **kwargs):
 		self.executor = executor
 		self.commands = {}
-		self.load_commands('hi')
+		
+		# Load commands
+		# TODO: Maybe move this to `self.load_command()` for use by `!load`?
+		commands_to_load = []
+		try:
+			# Load commands from file
+			with open('loaded_commands.json') as f:
+				for command, enabled in json.load(f).items():
+					if enabled:
+						commands_to_load.append(command)
+		except FileNotFoundError:
+			# If the file doesn't exist, try and load all commands that don't 
+			# begin with an underscore, and create the file
+			# TODO: Save file after loading commands (so that failed ones 
+			# don't try to load next time)
+			try:
+				for file_path in os.listdir('commands'):
+					if (
+						not file_path.startswith('_')
+						and os.path.isfile(
+							os.path.join('commands', file_path)
+						)
+						and os.path.splitext(file_path)[1] == '.py'
+					):
+						commands_to_load.append(
+							os.path.splitext(file_path)[0]
+						)
+				with open('loaded_commands.json', 'w') as f:
+					json.dump(
+						{command: True for command in commands_to_load},
+						f,
+						indent=4,
+					)
+				print(commands_to_load)
+			except FileNotFoundError:
+				print('No `commands` folder!')
+		
+		# Load the commands
+		# TODO: Maybe move this somewhere else?
+		failed_commands = self.load_commands(*commands_to_load)
+		for failed_command, reason in failed_commands.items():
+			if reason == ModuleNotFoundError:
+				print(f'Cannot find module `{failed_command}.py`!')
+			elif reason == AttributeError:
+				print(
+					f"Module `{failed_command}.py` doesn't implement the "
+					'command API properly!'
+				)
+			else:
+				print(
+					f'Failed to load `{failed_command}.py for an unknown '
+					'reason!'
+				)
+		
+		# Check to see if "control commands" are loaded
+		control_commands = ['load', 'unload', 'reload']
+		for control_command in control_commands:
+			if control_command not in self.commands:
+				print(f'Warning: Command `{control_command}` not loaded!')
+		
+		# Don't override `discord.Client.__init__()`
 		super().__init__(*args, **kwargs)
 	
 	async def on_ready(self):
 		print('Ready!')
 	
+	async def on_connect(self):
+		print('Connected!')
+	
 	async def on_disconnect(self):
 		print('Disconnected!')
+	
+	async def on_resumed(self):
+		print('Resumed!')
 	
 	async def on_message(self, message: discord.Message):
 		# Never reply to self
@@ -60,102 +108,123 @@ class Client(discord.Client):
 			return
 		
 		# Only reply to commands. Commands are either prefixed with the prefix 
-		# charater, or prefixed with a mention to the bot. Mentions in 
-		# messages have a "!" in them, and `self.user.mention` doesn't, so 
-		# that needs to be added manually. 
-		user_mention_text = '{}!{}'.format(
-			self.user.mention[:2],
-			self.user.mention[2:],
-		)
+		# charater, or prefixed with a mention to the bot.
 		if not (
 			message.content.startswith('!')
-			or message.content.startswith(user_mention_text)
+			or message.content.startswith(
+				self.mention_to_text(self.user.mention)
+			)
 		):
 			return
 		
-		# Remove command specifier from message (and proceeding white-space)
-		if message.content.startswith('!'):
-			stripped_message = message.content.removeprefix('!')
-		else:
-			stripped_message = message.content.removeprefix(user_mention_text)
-		stripped_message = stripped_message.lstrip()
-		
-		
-		# TODO: Turn message string into argument list (perhaps with 
-		# `str.split()`), and then execute the command.
-		# 
-		# How the command API should work:
-		# * Commands are put in the `modules` folder as Python modules
-		# * All modules in the `modules` folder are loaded/reloaded on command 
-		# without requiring a bot restart
-		# * Command modules should include 2 commands:
-		#   1: command(client, message, namespace)
-		#   2: arg_parser()
-		# command() function is executed, arg_parser() function should return 
-		# an argparser.ArgumentParser object that is used to parse the 
-		# arguments for the command.
-		# 
-		# Command modules should be able to use `send_message()` from this 
-		# file. `__init__.py` might be useful here?
-		
-		
-		msg = stripped_message.split()
-		
-		if msg[0] == 'hi':
-			print(self.reload_commands('hi'))
-			self.commands['hi'].command(
-				self,
-				message,
-				self.commands['hi'].arg_parser().parse_args(msg[1:]),
-			)
-		
-		
-		# # Run command
-		# await self.loop.run_in_executor(
-		# 	self.executor,
-		# 	quantum_vortex,  # Func
-		# 	self,  # arg1
-		# 	message,  # arg2
-		# )
-		
 		# Log
-		print(f'{message.author}: {stripped_message}')
+		print(f'{message.author}: {message.content}')
+		
+		# Parse the message
+		try:
+			commands = self.parse_command(message.content)
+		except self.InvalidCommandError:
+			print(f'Invalid command: {message.content}')
+			return
+		
+		# Run the command(s)
+		for command, args in commands.items():
+			if command in self.commands.keys():
+				await self.run_command(
+					command,
+					message,
+					self.commands[command].parser.parse_args(args)
+				)
+			else:
+				print(f'Command not found: {command} ({args})')
+		
+		return
+	
+	def parse_command(self, text: str) -> dict:
+		# Remove command prefix from message (and subsequent proceeding 
+		# white-space)
+		if text.startswith('!'):
+			stripped_text = text.removeprefix('!')
+		else:
+			stripped_text = text.removeprefix(
+				self.mention_to_text(self.user.mention)
+			)
+		stripped_text = stripped_text.lstrip()
+		
+		# TODO: This should consider several things before returning a list of 
+		# arguments. It should consider quotes and deal with them like shells 
+		# do (or at least how bash does), and allow multiple commands to be 
+		# executes at once with `&&` and `||` syntax, also like shells. 
+		# Additionally, it should be able to work well with multiple lines. 
+		
+		split_text = stripped_text.split()
+		
+		# Raise `self.InvalidCommandError` if the command given was just a 
+		# prefix. This error should also be raised if something else about the 
+		# text was invalid when parsing it (such as invalid use of quotes).
+		if len(split_text) >= 1:
+			return {split_text[0]: split_text[1:]}
+		else:
+			raise self.InvalidCommandError
+	
+	async def run_command(
+		self,
+		command: str,
+		message: discord.Message,
+		args: argparse.Namespace,
+	):
+		# Run a command, and if the command function returns something other 
+		# than None, send it as a message (which is a useful shorthand for 
+		# simple commands).
+		result = await self.loop.run_in_executor(
+			self.executor,  # Executor to run the command in
+			self.commands[command].command,  # The function to run
+			self, message, args,  # The args to pass to the function
+		)
+		if result != None:
+			await message.channel.send(result)
 	
 	def run_coro(self, coro):
 		asyncio.run_coroutine_threadsafe(coro, self.loop)
 	
 	def load_commands(self, *commands: str) -> dict:
+		# Unloading then loading a module is not the same as reloading it!
 		importlib.invalidate_caches()
 		
 		invalid_commands = {}
 		for command in commands:
+			# Try to import the module
 			try:
-				# Import module
-				self.commands[command] = importlib.import_module(
+				imported_command = importlib.import_module(
 					f'commands.{command}'
 				)
 			except ModuleNotFoundError:
 				invalid_commands[command] = ModuleNotFoundError
 				continue
+			
+			# Check to see if the module implements the command API
 			try:
-				# Check to see if the module implements the command API
-				for function_name in ['command', 'arg_parser']:
+				for function_name in ['command', 'make_parser']:
 					if not callable(getattr(
-						self.commands[command],
+						imported_command,
 						function_name,
 					)):
 						raise AttributeError
 			except AttributeError:
 				invalid_commands[command] = AttributeError
+				continue
+			# Add the command
+			self.commands[command] = self.Command(
+				imported_command.command,
+				imported_command.make_parser()
+			)
 		
 		return invalid_commands
 	
-	def unload_commands(self, *commands: str):
-		importlib.invalidate_caches()
-		
-		
+	def unload_commands(self, *commands: str) -> dict:
+		# Can't actually *unload* functions, but can unbind them. To reload 
+		# them, the reload_commands() function has to be used.
 		invalid_commands = {}
-		
 		for command in commands:
 			try:
 				self.commands.pop(command)
@@ -164,9 +233,10 @@ class Client(discord.Client):
 		
 		return invalid_commands
 	
-	def reload_commands(self, *commands: str):
+	def reload_commands(self, *commands: str) -> dict:
+		# Doesn't truly reload, but should be close enough for most cases.
+		# https://docs.python.org/3/library/importlib.html#importlib.reload
 		invalid_commands = {}
-		
 		for command in commands:
 			try:
 				importlib.reload(self.commands[command])
@@ -174,12 +244,6 @@ class Client(discord.Client):
 				invalid_commands[command] = ModuleNotFoundError
 		
 		return invalid_commands
-		
-		
-		# invalid_unload = self.unload_commands(*commands)
-		# invalid_load = self.load_commands(*commands)
-		
-		# return invalid_unload, invalid_load
 
 
 if __name__ == '__main__':
