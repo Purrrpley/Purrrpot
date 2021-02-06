@@ -59,3 +59,64 @@ def scheduled(client):
 			):
 				client.run_coro(channel.send("Here's your hourly text!"))
 ```
+
+# Class Extensions API
+
+The API should likely be a class instead, for several reasons. An example of how this could work:
+
+```py
+import argparse
+import time
+
+
+class Extension:
+	def __init__(self, client):
+		self.client = client
+		
+		self.parser = argparse.ArgumentParser()
+		self.parser.add_argument('text', type=str)
+		self.parser.add_argument('--delay', '-d', type=int)
+		self.parser.add_argument(
+			'--remember',
+			'-r',
+			action='store_true',
+			default=False,
+		)
+		
+		self.cron_schedule = '@hourly'
+	
+	def command(self, msg, args):
+		if args.delay:
+			text = f'Hello after {args.delay} seconds!'
+				f'I was called by {msg.author.name}'
+			_say_after_delay(
+				client,
+				msg.channel,
+				text,
+				args.delay,
+				args.remember,
+			)
+		else:
+			return f'Hello {msg.author.name}!'
+				f"Here's some text: \"{args.text}\""
+	
+	def scheduled(self, when, now):
+		for guild in self.client.guilds:
+			for channel in guild.channels:
+				if (
+					channel.name == 'hourly-text'
+					and channel.permissions_for(self.client.user).send_messages
+				):
+					self.client.run_coro(channel.send(
+						f"Here's your hourly text! It is hour {now.hour}."
+					))
+	
+	def _say_after_delay(self, location, text, delay, remember=False):
+		if remember:
+			self.client.schedule(
+				delay, 0, client.run_coro, location.send(text)
+			)
+		else:
+			time.sleep(delay)
+			location.send(text)
+```
